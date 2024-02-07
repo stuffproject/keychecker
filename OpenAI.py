@@ -1,4 +1,17 @@
-import APIKey
+import sys
+import asyncio
+import aiohttp
+
+class APIKey:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.model = None
+        self.organizations = []
+        self.default_org = None
+        self.has_quota = True
+        self.rpm = None
+        self.tier = None
+        self.trial = False
 
 oai_api_url = "https://api.openai.com/v1"
 oai_t1_rpm_limits = {"gpt-3.5-turbo": 3500, "gpt-4": 500, "gpt-4-32k": 20}
@@ -21,7 +34,6 @@ async def get_oai_model(key: APIKey, session):
             key.model = top_model
             return True
 
-
 async def get_oai_key_attribs(key: APIKey, session):
     chat_object = {"model": f'{key.model}', "messages": [{"role": "user", "content": ""}], "max_tokens": 0}
     async with session.post(f'{oai_api_url}/chat/completions',
@@ -41,8 +53,8 @@ async def get_oai_key_attribs(key: APIKey, session):
                     key.has_quota = False
                 case "invalid_request_error":
                     key.has_quota = True
-                    key.rpm = int(response.headers.get("x-ratelimit-limit-requests"))
-                    if key.rpm < oai_t1_rpm_limits[key.model]:  # oddly seen some gpt4 trial keys
+                    key.rpm = int(response.headers.get("x-ratelimit-limit-requests")) if response.headers.get("x-ratelimit-limit-requests") else None
+                    if key.rpm and key.rpm < oai_t1_rpm_limits[key.model]:  # Add a check for key.rpm before comparison
                         key.trial = True
                     key.tier = await get_oai_key_tier(key, session)
         else:
@@ -50,12 +62,11 @@ async def get_oai_key_attribs(key: APIKey, session):
         return True
 
 
-# this will weed out fake t4/t5 keys reporting a 10k rpm limit, those keys would have requested to have their rpm increased
 async def get_oai_key_tier(key: APIKey, session):
     if key.trial:
         return 'Free'
     chat_object = {"model": f'gpt-3.5-turbo', "messages": [{"role": "user", "content": ""}], "max_tokens": 0}
-    for _ in range(3):  # we'll give it 3 shots if oai decides to shid itself.
+    for _ in range(3):
         async with session.post(f'{oai_api_url}/chat/completions',
                                 headers={'Authorization': f'Bearer {key.api_key}', 'accept': 'application/json'},
                                 json=chat_object) as response:
@@ -67,7 +78,6 @@ async def get_oai_key_tier(key: APIKey, session):
             else:
                 return
     return
-
 
 async def get_oai_org(key: APIKey, session):
     async with session.get(f'{oai_api_url}/organizations', headers={'Authorization': f'Bearer {key.api_key}'}) as response:
@@ -84,15 +94,14 @@ async def get_oai_org(key: APIKey, session):
                 key.organizations.append(org["name"])
         return True
 
-
 def check_manual_increase(key: APIKey):
-    if key.model == 'gpt-3.5-turbo' and key.rpm > 3500:
+    if key.model == 'gpt-3.5-turbo' and key.rpm is not None and key.rpm > 3500:
         return True
-    elif key.tier == 'Tier1' and key.model != 'gpt-3.5-turbo' and key.rpm > 500:
+    elif key.tier == 'Tier1' and key.model != 'gpt-3.5-turbo' and key.rpm is not None and key.rpm > 500:
         return True
-    elif key.tier in ['Tier2', 'Tier3'] and key.rpm > 5000:
+    elif key.tier in ['Tier2', 'Tier3'] and key.rpm is not None and key.rpm > 5000:
         return True
-    elif key.tier in ['Tier3', 'Tier4'] and key.rpm > 10000:
+    elif key.tier in ['Tier3', 'Tier4'] and key.rpm is not None and key.rpm > 10000:
         return True
     return False
 
@@ -177,3 +186,29 @@ def pretty_print_oai_keys(keys):
               + (f" | other orgs - {key.organizations}" if len(key.organizations) > 1 else ""))
 
     print(f'\n--- Total Valid OpenAI Keys: {len(keys)} ({quota_count} in quota, {no_quota_count} no quota, {org_count} orgs, {t5_count} Tier5) ---\n')
+
+async def main():  # Declare main as an asynchronous function
+    if len(sys.argv) != 3 or sys.argv[1] != "-file":
+        print("Usage: python example.py -file <filename>")
+        sys.exit(1)
+
+    filename = sys.argv[2]
+    try:
+        with open(filename, "r") as file:
+            api_keys = [line.strip() for line in file.readlines() if line.strip()]
+    except FileNotFoundError:
+        print("File not found.")
+        sys.exit(1)
+
+    keys = []
+    session = aiohttp.ClientSession()  # Assuming you are using aiohttp for async http requests
+    for api_key in api_keys:
+        key = APIKey(api_key)  # Instantiate APIKey objects
+        if await get_oai_model(key, session):  # Assuming get_oai_model is the function to check OpenAI key
+            keys.append(key)
+
+    pretty_print_oai_keys(keys)
+    await session.close()  # Don't forget to close the session when you're done
+
+if __name__ == "__main__":
+    asyncio.run(main())
