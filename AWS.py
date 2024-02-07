@@ -1,78 +1,63 @@
 import json
 import boto3
-import APIKey
 import botocore.exceptions
+import traceback
+import sys
 
+class APIKey:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.region = ""
+        self.username = ""
+        self.admin_priv = False
+        self.bedrock_enabled = False
+        self.logged = False
+        self.useless = True
+        self.useless_reasons = []
 
+# Define AWS regions outside the class
 aws_regions = [
-    "us-east-2",
-    "us-east-1",
-    "us-west-1",
-    "us-west-2",
-    "af-south-1",
-    "ap-east-1",
-    "ap-south-2",
-    "ap-southeast-3",
-    "ap-southeast-4",
-    "ap-south-1",
-    "ap-northeast-3",
-    "ap-northeast-2",
-    "ap-southeast-1",
-    "ap-southeast-2",
-    "ap-northeast-1",
-    "ca-central-1",
-    "eu-central-1",
-    "eu-west-1",
-    "eu-west-2",
-    "eu-south-1",
-    "eu-west-3",
-    "eu-south-2",
-    "eu-north-1",
-    "eu-central-2",
-    "il-central-1",
-    "me-south-1",
-    "me-central-1",
+    "us-east-2", "us-east-1", "us-west-1", "us-west-2", "af-south-1", "ap-east-1", "ap-south-2",
+    "ap-southeast-3", "ap-southeast-4", "ap-south-1", "ap-northeast-3", "ap-northeast-2", "ap-southeast-1",
+    "ap-southeast-2", "ap-northeast-1", "ca-central-1", "eu-central-1", "eu-west-1", "eu-west-2", "eu-south-1",
+    "eu-west-3", "eu-south-2", "eu-north-1", "eu-central-2", "il-central-1", "me-south-1", "me-central-1",
     "sa-east-1"
 ]
 
-
 def check_aws(key: APIKey):
-    line = key.api_key.split(":")
-    access_key = line[0]
-    secret = line[1]
-
     try:
-        try:
-            session = boto3.Session(aws_access_key_id=access_key,aws_secret_access_key=secret)
-            sts_client = session.client("sts")
-            iam_client = session.client("iam")
-            bedrock_runtime_client = session.client("bedrock-runtime")
+        line = key.api_key.split(":")
+        if len(line) < 2:
+            print("Invalid API key format")
+            return False
+        
+        access_key = line[0]
+        secret = line[1]
 
-            region = get_region(session)
-            if region is not None:
-                key.region = region
-                # key.bedrock_enabled = True
-                key.useless = False
-            else:
-                key.useless_reasons.append('Failed Region Fetch')
+        session = boto3.Session(aws_access_key_id=access_key, aws_secret_access_key=secret)
+        region = get_region(session)
+        print(f"Debug: Region - {region}")  # Debug print
 
-            response = sts_client.get_caller_identity()
-            if response and 'Arn' in response:
-                arn_parts = response['Arn'].split('/')
-                if len(arn_parts) > 1:
-                    username = arn_parts[1]
-                else:
-                    username = 'default'
-            else:
-                username = 'default'
-            if username is not None:
-                key.username = username
-        except botocore.exceptions.ClientError:
-            return
+        if region is not None:
+            key.region = region
+            key.useless = False
+        else:
+            key.useless_reasons.append('Failed Region Fetch')
+
+        sts_client = session.client("sts")
+        iam_client = session.client("iam")
+        bedrock_runtime_client = session.client("bedrock-runtime")
+
+        response = sts_client.get_caller_identity()
+        print(f"Debug: Response - {response}")  # Debug print
+
+        if response and 'Arn' in response:
+            arn_parts = response['Arn'].split('/')
+            key.username = arn_parts[1] if len(arn_parts) > 1 else 'default'
 
         policies = None
         try:
-            policies = iam_client.list_attached_user_policies(UserName=username)['AttachedPolicies']
+            policies = iam_client.list_attached_user_policies(UserName=key.username)['AttachedPolicies']
         except botocore.exceptions.ClientError:
             key.useless_reasons.append('Failed Policy Fetch')
 
@@ -108,11 +93,11 @@ def check_aws(key: APIKey):
             key.useless_reasons.append('Key policies lack Admin or User Creation perms')
         return True
 
-    except botocore.exceptions.ClientError as e:
-        print(e)
+    except botocore.exceptions.ClientError as ce:
+        traceback.print_exc()  # This will print the stack trace
+        print(f"Debug: Outer ClientError - {ce}")  # Debug print
         print("Please report this on github if you see this because I missed something if this shows up.")
-        return
-
+        return False
 
 def get_region(session):
     for region in aws_regions:
@@ -126,7 +111,6 @@ def get_region(session):
         except botocore.exceptions.ClientError:
             return
 
-
 def test_invoke_perms(bedrock_runtime_client):
     data = {
         "prompt": "\n\nHuman:\n\nAssistant:",
@@ -138,7 +122,6 @@ def test_invoke_perms(bedrock_runtime_client):
         return True
     except bedrock_runtime_client.exceptions.AccessDeniedException:
         return
-
 
 def check_logging(session, key: APIKey):
     try:
@@ -153,41 +136,67 @@ def check_logging(session, key: APIKey):
     except botocore.exceptions.ClientError:
         return
 
-
 def pretty_print_aws_keys(keys):
     print('-' * 90)
-    admin_count = 0
-    ready_to_go_keys = []
-    needs_setup_keys = []
-    useless_keys = []
+    admin_keys = [key for key in keys if key.admin_priv]
+    print("Admin Keys:")
+    print_keys(admin_keys)
+    print('-' * 90)
 
-    for key in keys:
-        if key.useless:
-            useless_keys.append(key)
-        else:
-            if key.admin_priv:
-                admin_count += 1
-            if key.bedrock_enabled:
-                ready_to_go_keys.append(key)
-            else:
-                needs_setup_keys.append(key)
+    non_admin_keys = [key for key in keys if not key.admin_priv]
+    print("Non-Admin Keys:")
+    print_keys(non_admin_keys)
+    print('-' * 90)
 
-    if ready_to_go_keys:
-        print(f"Validated {len(ready_to_go_keys)} AWS keys that are working and already have Bedrock setup.")
-        for key in ready_to_go_keys:
-            print(f'{key.api_key}' + (f' | {key.username}' if key.username != "" else "") +
-                  (' | admin key' if key.admin_priv else "") + (f' | {key.region}' if key.region != "" else "") +
-                  (' | LOGGED KEY' if key.logged is True else ""))
+def print_keys(keys):
+    for idx, key in enumerate(keys, 1):
+        print(f"Key {idx}:")
+        print(f"  API Key: {key.api_key}")
+        print(f"  Username: {key.username}")
+        print(f"  Region: {key.region}")
+        print(f"  Bedrock Enabled: {key.bedrock_enabled}")
+        print(f"  Admin Privilege: {key.admin_priv}")
+        print(f"  Logged: {key.logged}")
+        print(f"  Useless: {key.useless}")
+        if key.useless_reasons:
+            print("  Useless Reasons:")
+            for reason in key.useless_reasons:
+                print(f"    - {reason}")
 
-    if needs_setup_keys:
-        print(f"\nValidated {len(needs_setup_keys)} AWS keys that failed to invoke Claude and need further permissions setup. Keys without a region displayed do not have the models setup and need to do so")
-        for key in needs_setup_keys:
-            print(f'{key.api_key}' + (f' | {key.username}' if key.username != "" else "") +
-                  (' | admin key' if key.admin_priv else "") + (f' | {key.region}' if key.region != "" else ""))
+# Example usage:
+def pretty_print_aws_keys(keys):
+    print('-' * 90)
+    admin_keys = [key for key in keys if key.admin_priv]
+    print("Admin Keys:")
+    print_keys(admin_keys)
+    print('-' * 90)
 
-    if useless_keys:
-        print(f"\nValidated {len(useless_keys)} AWS keys that are deemed useless and most likely s3 slop (can't be used to setup Bedrock/Claude)")
-        for key in useless_keys:
-            print(f'{key.api_key}' + (f' | {key.username}' if key.username != "" else "")
-                  + (f' | REASON - {key.useless_reasons}' if len(key.useless_reasons) > 1 else ''))
-    print(f'\n--- Total Valid RPable AWS Keys: {len(keys) - len(useless_keys)} ({admin_count} with admin priv) ---\n')
+    non_admin_keys = [key for key in keys if not key.admin_priv]
+    print("Non-Admin Keys:")
+    print_keys(non_admin_keys)
+    print('-' * 90)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3 or sys.argv[1] != "-file":
+        print("Usage: python example.py -file <filename>")
+        sys.exit(1)
+    
+    filename = sys.argv[2]
+    
+    try:
+        with open(filename, "r") as file:
+            api_keys = file.readlines()
+        # Remove newline characters from the end of each line
+        api_keys = [key.strip() for key in api_keys]
+    except FileNotFoundError:
+        print(f"File '{filename}' not found.")
+        sys.exit(1)
+
+    # Now api_keys contains the API keys read from the file
+    keys = []
+    for api_key in api_keys:
+        key = APIKey(api_key)
+        if check_aws(key):
+            keys.append(key)
+
+    pretty_print_aws_keys(keys)
